@@ -2,35 +2,25 @@ import { Injectable } from '@nestjs/common';
 import { TransactionsService } from '../transactions/transactions.service';
 import { SeatNotAvailableError } from '../../common/errors/app-error';
 
+const seatsCache = new Map<string, { data: any; expiry: number }>();
+const CACHE_TTL_MS = 10000;
+
 @Injectable()
 export class SeatsRepository {
   constructor(private readonly tx: TransactionsService) {}
 
-  async reserveAvailableSeats(eventId: string, userId: string, seatIds: string[]) {
-    return this.tx.run(async (client) => {
-      const seats = (await client.$queryRawUnsafe(
-        `SELECT id FROM seats
-         WHERE event_id = $1::uuid AND id = ANY($2::uuid[]) AND status = 0
-         ORDER BY id
-         FOR UPDATE SKIP LOCKED`,
-        eventId,
-        seatIds,
-      )) as { id: string }[];
+  async lockAvailableSeatsInTx(client: any, eventId: string, seatIds: string[]) {
+    const seats = (await client.$queryRawUnsafe(
+      `SELECT id FROM seats
+       WHERE event_id = $1::uuid AND id = ANY($2::uuid[]) AND status = 0
+       FOR UPDATE SKIP LOCKED`,
+      eventId,
+      seatIds,
+    )) as { id: string }[];
 
-      if (seats.length !== seatIds.length) {
-        throw new SeatNotAvailableError();
-      }
-
-      const updated = (await client.$executeRawUnsafe(
-        `UPDATE seats
-         SET status = 1, reserved_by = $1::uuid, reserved_until = now() + interval '10 minutes'
-         WHERE id = ANY($2::uuid[])`,
-        userId,
-        seatIds,
-      )) as number;
-
-      return { held: updated, seatIds };
-    });
+    if (seats.length !== seatIds.length) {
+      throw new SeatNotAvailableError();
+    }
   }
 
   async releaseExpiredHolds() {
@@ -42,13 +32,21 @@ export class SeatsRepository {
   }
 
   async findAvailableByEvent(eventId: string) {
-    return this.tx.rawQuery<{ id: string; rowLabel: string; seatNumber: number; status: number }[]>(
+    const cached = seatsCache.get(eventId);
+    if (cached && cached.expiry > Date.now()) {
+      return cached.data;
+    }
+
+    const data = await this.tx.rawQuery<{ id: string; rowLabel: string; seatNumber: number; status: number }[]>(
       `SELECT id, row_label as "rowLabel", seat_number as "seatNumber", status
        FROM seats
        WHERE event_id = $1::uuid
        ORDER BY row_label, seat_number`,
       [eventId],
     );
+
+    seatsCache.set(eventId, { data, expiry: Date.now() + CACHE_TTL_MS });
+    return data;
   }
 
   async confirmPurchase(reservationId: string) {

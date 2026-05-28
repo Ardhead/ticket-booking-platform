@@ -1,44 +1,69 @@
 import { Injectable } from '@nestjs/common';
 import { TransactionsService } from '../transactions/transactions.service';
 import { SeatsRepository } from '../seats/seats.repository';
+import { SeatNotAvailableError } from '../../common/errors/app-error';
+import { IdempotencyService } from '../idempotency/idempotency.service';
 
 @Injectable()
 export class ReservationsService {
   constructor(
     private readonly tx: TransactionsService,
     private readonly seatsRepo: SeatsRepository,
+    private readonly idempotencyService: IdempotencyService,
   ) {}
 
-  async reserve(userId: string, eventId: string, seatIds: string[]) {
-    const result = await this.seatsRepo.reserveAvailableSeats(eventId, userId, seatIds);
+  async reserve(userId: string, eventId: string, seatIds: string[], idempotencyOpts?: { operationType: string; idempotencyKey: string }) {
+    const available = await this.tx.rawQuery<{ count: bigint }[]>(
+      `SELECT COUNT(*)::int as count FROM seats WHERE event_id = $1::uuid AND status = 0 LIMIT 1`,
+      [eventId],
+    );
+    if (Number(available[0].count) === 0) {
+      throw new SeatNotAvailableError();
+    }
 
-    return this.tx.run(async (client) => {
-      const reservation = (await client.$queryRawUnsafe(
-        `INSERT INTO reservations (id, user_id, event_id, status, expires_at)
-         VALUES (gen_random_uuid(), $1::uuid, $2::uuid, 0, now() + interval '10 minutes')
-         RETURNING id`,
-        userId,
-        eventId,
-      )) as { id: string }[];
+    try {
+      return await this.tx.run(async (client) => {
+        await this.seatsRepo.lockAvailableSeatsInTx(client, eventId, seatIds);
 
-      const reservationId = reservation[0].id;
+        const reservation = (await client.$queryRawUnsafe(
+          `INSERT INTO reservations (id, user_id, event_id, status, expires_at)
+           VALUES (gen_random_uuid(), $1::uuid, $2::uuid, 0, now() + interval '10 minutes')
+           RETURNING id`,
+          userId,
+          eventId,
+        )) as { id: string }[];
 
-      for (const seatId of seatIds) {
+        const reservationId = reservation[0].id;
+
+        const values = seatIds.map((_, i) => `($1::uuid, $${i + 2}::uuid)`).join(', ');
         await client.$executeRawUnsafe(
-          `INSERT INTO reservation_seats (reservation_id, seat_id) VALUES ($1::uuid, $2::uuid)`,
+          `INSERT INTO reservation_seats (reservation_id, seat_id) VALUES ${values}`,
           reservationId,
-          seatId,
+          ...seatIds,
         );
+
+        await client.$executeRawUnsafe(
+          `UPDATE seats
+           SET status = 1, reserved_by = $1::uuid, reservation_id = $2::uuid,
+               reserved_until = now() + interval '10 minutes'
+           WHERE id = ANY($3::uuid[])`,
+          userId,
+          reservationId,
+          seatIds,
+        );
+
+        if (idempotencyOpts) {
+          await this.idempotencyService.completeInTx(client, idempotencyOpts.operationType, idempotencyOpts.idempotencyKey, { reservationId });
+        }
+
+        return { reservationId, expiresAt: new Date(Date.now() + 10 * 60 * 1000), _idempotencyCompleted: true };
+      });
+    } catch (e) {
+      if (idempotencyOpts) {
+        await this.idempotencyService.fail(idempotencyOpts.operationType, idempotencyOpts.idempotencyKey);
       }
-
-      await client.$executeRawUnsafe(
-        `UPDATE seats SET reservation_id = $1::uuid WHERE id = ANY($2::uuid[])`,
-        reservationId,
-        seatIds,
-      );
-
-      return { reservationId, expiresAt: new Date(Date.now() + 10 * 60 * 1000) };
-    });
+      throw e;
+    }
   }
 
   async expireOverdue() {

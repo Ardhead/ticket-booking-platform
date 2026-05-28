@@ -19,11 +19,15 @@ export class IdempotencyInterceptor implements NestInterceptor {
     }
 
     return next.handle().pipe(
-      mergeMap((result) =>
-        from(this.idempotencyService.complete(request.idempotencyOperationType, request.idempotencyKey, result)).pipe(
+      mergeMap((result) => {
+        if (result && result._idempotencyCompleted) {
+          const { _idempotencyCompleted, ...clean } = result;
+          return of(clean);
+        }
+        return from(this.idempotencyService.complete(request.idempotencyOperationType, request.idempotencyKey, result)).pipe(
           mergeMap(() => of(result)),
-        ),
-      ),
+        );
+      }),
       catchError((err) =>
         from(this.idempotencyService.fail(request.idempotencyOperationType, request.idempotencyKey)).pipe(
           mergeMap(() => throwError(() => err)),

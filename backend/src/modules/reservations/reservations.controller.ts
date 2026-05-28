@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Headers, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Controller, Post, Body, Headers, UseGuards, UseInterceptors, Req } from '@nestjs/common';
 import { IsArray, IsUUID, ArrayNotEmpty } from 'class-validator';
 import { ReservationsService } from './reservations.service';
 import { IdempotencyGuard } from '../idempotency/idempotency.guard';
@@ -22,7 +22,11 @@ export class ReservationsController {
     @Body() dto: CreateReservationDto,
     @Headers('x-user-id') userId: string,
     @Headers('x-event-id') eventId: string,
+    @Req() req: Request,
   ) {
-    return this.reservationsService.reserve(userId, eventId, dto.seatIds);
+    const idempotencyOpts = (req as any).idempotencyKey
+      ? { operationType: (req as any).idempotencyOperationType, idempotencyKey: (req as any).idempotencyKey }
+      : undefined;
+    return this.reservationsService.reserve(userId, eventId, dto.seatIds, idempotencyOpts);
   }
 }
