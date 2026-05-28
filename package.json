@@ -1,0 +1,13 @@
+{
+  "name": "ticket-booking-platform",
+  "private": true,
+  "scripts": {
+    "test:e2e:backend": "npm run test:e2e --prefix backend",
+    "test:e2e:frontend": "npm run test:e2e --prefix frontend",
+    "test:e2e": "npm run test:e2e:backend && npm run test:e2e:frontend",
+    "test:load": "k6 run backend/k6/load-test.js",
+    "test:load:smoke": "k6 run backend/k6/scenarios/smoke.js",
+    "test:load:contention": "k6 run backend/k6/scenarios/contention.js",
+    "test:load:all": "k6 run backend/k6/scenarios/smoke.js && k6 run backend/k6/scenarios/contention.js && k6 run backend/k6/load-test.js"
+  }
+}
